@@ -1,14 +1,19 @@
 workflows:
-  android-workflow:
-    name: Android Build
+  android-release:
+    name: Android Release APK
+    max_build_duration: 15
     environment:
+      flutter: stable
       vars:
+        # 配置国内镜像，解决网络问题
         PUB_HOSTED_URL: "https://pub.flutter-io.cn"
         FLUTTER_STORAGE_BASE_URL: "https://storage.flutter-io.cn"
     scripts:
-      - name: Install dependencies
+      - name: 1. 安装依赖
         script: flutter pub get
-      - name: Build APK
-        script: flutter build apk --release
+      - name: 2. 自动生成缺失的代码
+        script: flutter packages pub run build_runner build --delete-conflicting-outputs
+      - name: 3. 打包 APK
+        script: flutter build apk --release --no-shrink
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
