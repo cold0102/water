@@ -1,37 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:hive/hive.dart';
-import 'package:hive_flutter/hive_flutter.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
 
-part 'main.g.dart';
-
-@HiveType(typeId: 0)
-class WaterRecord {
-  @HiveField(0)
-  final int amount;
-  @HiveField(1)
-  final DateTime time;
-  WaterRecord(this.amount, this.time);
-}
-
-@HiveType(typeId: 1)
-class UserSettings {
-  @HiveField(0)
-  int dailyGoal;
-  @HiveField(1)
-  int reminderInterval;
-  UserSettings({this.dailyGoal = 2000, this.reminderInterval = 2});
-}
-
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await Hive.initFlutter();
-  Hive.registerAdapter(WaterRecordAdapter());
-  Hive.registerAdapter(UserSettingsAdapter());
-  await Hive.openBox<WaterRecord>('records');
-  await Hive.openBox<UserSettings>('settings');
-  runApp(const MyApp());
-}
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -52,65 +23,70 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  late Box<WaterRecord> recordsBox;
-  late Box<UserSettings> settingsBox;
-  late UserSettings settings;
-  final FlutterLocalNotificationsPlugin notificationsPlugin =
-      FlutterLocalNotificationsPlugin();
+  int _todayTotal = 0;
+  int _dailyGoal = 2000;
+  List<Map<String, dynamic>> _todayRecords = [];
 
   @override
   void initState() {
     super.initState();
-    recordsBox = Hive.box<WaterRecord>('records');
-    settingsBox = Hive.box<UserSettings>('settings');
-    settings = settingsBox.get('settings') ?? UserSettings();
-    _initNotifications();
+    _loadData();
   }
 
-  void _initNotifications() async {
-    const AndroidInitializationSettings androidSettings =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    const InitializationSettings initSettings =
-        InitializationSettings(android: androidSettings);
-    await notificationsPlugin.initialize(initSettings);
-  }
-
-  int get _todayTotal {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    return recordsBox.values
-        .where((r) => r.time.isAfter(today))
-        .fold(0, (sum, r) => sum + r.amount);
-  }
-
-  void _addWater(int amount) {
-    recordsBox.add(WaterRecord(amount, DateTime.now()));
+  Future<void> _loadData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    final savedDate = prefs.getString('lastDate') ?? '';
+    
+    if (savedDate != today) {
+      _todayTotal = 0;
+      _todayRecords = [];
+      await prefs.setString('lastDate', today);
+    } else {
+      _todayTotal = prefs.getInt('todayTotal') ?? 0;
+      final recordsJson = prefs.getString('todayRecords') ?? '[]';
+      _todayRecords = List<Map<String, dynamic>>.from(jsonDecode(recordsJson));
+    }
+    
+    _dailyGoal = prefs.getInt('dailyGoal') ?? 2000;
     setState(() {});
   }
 
-  void _showTestNotification() async {
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'water_reminder',
-      '喝水提醒',
-      channelDescription: '定时提醒喝水',
-      importance: Importance.high,
-      priority: Priority.high,
-    );
-    const NotificationDetails details = NotificationDetails(android: androidDetails);
-    await notificationsPlugin.show(0, '该喝水啦 💧', '保持好习惯', details);
+  Future<void> _addWater(int amount) async {
+    final prefs = await SharedPreferences.getInstance();
+    _todayTotal += amount;
+    _todayRecords.add({'amount': amount, 'time': TimeOfDay.now().format(context)});
+    
+    await prefs.setInt('todayTotal', _todayTotal);
+    await prefs.setString('todayRecords', jsonEncode(_todayRecords));
+    setState(() {});
+  }
+
+  Future<void> _resetToday() async {
+    final prefs = await SharedPreferences.getInstance();
+    _todayTotal = 0;
+    _todayRecords = [];
+    await prefs.setInt('todayTotal', 0);
+    await prefs.setString('todayRecords', jsonEncode([]));
+    setState(() {});
   }
 
   void _openSettings() async {
     final result = await Navigator.push(
       context,
-      MaterialPageRoute(builder: (context) => SettingsPage(settings: settings)),
+      MaterialPageRoute(builder: (context) => SettingsPage(currentGoal: _dailyGoal)),
     );
-    if (result != null) setState(() => settings = result);
+    if (result != null) {
+      final prefs = await SharedPreferences.getInstance();
+      _dailyGoal = result;
+      await prefs.setInt('dailyGoal', _dailyGoal);
+      setState(() {});
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final progress = (_todayTotal / settings.dailyGoal).clamp(0.0, 1.0);
+    final progress = (_todayTotal / _dailyGoal).clamp(0.0, 1.0);
     return Scaffold(
       appBar: AppBar(
         title: const Text('喝水记录'),
@@ -136,7 +112,7 @@ class _HomePageState extends State<HomePage> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text('$_todayTotal', style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold)),
-                      Text('/ ${settings.dailyGoal} ml', style: TextStyle(fontSize: 18, color: Colors.grey[600])),
+                      Text('/ $_dailyGoal ml', style: TextStyle(fontSize: 18, color: Colors.grey[600])),
                     ],
                   ),
                 ],
@@ -153,21 +129,7 @@ class _HomePageState extends State<HomePage> {
               child: const Text('喝了一杯 (250ml)'),
             ),
             const SizedBox(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton(onPressed: _showTestNotification, child: const Text('测试提醒')),
-                const SizedBox(width: 16),
-                ElevatedButton(
-                  onPressed: () {
-                    final today = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
-                    recordsBox.values.where((r) => r.time.isAfter(today)).forEach((r) => r.delete());
-                    setState(() {});
-                  },
-                  child: const Text('重置今日'),
-                ),
-              ],
-            ),
+            ElevatedButton(onPressed: _resetToday, child: const Text('重置今日')),
           ],
         ),
       ),
@@ -176,8 +138,8 @@ class _HomePageState extends State<HomePage> {
 }
 
 class SettingsPage extends StatefulWidget {
-  final UserSettings settings;
-  const SettingsPage({super.key, required this.settings});
+  final int currentGoal;
+  const SettingsPage({super.key, required this.currentGoal});
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
@@ -188,13 +150,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
-    _goalController = TextEditingController(text: widget.settings.dailyGoal.toString());
-  }
-
-  void _saveSettings() {
-    widget.settings.dailyGoal = (int.tryParse(_goalController.text) ?? 2000).clamp(500, 5000);
-    Hive.box<UserSettings>('settings').put('settings', widget.settings);
-    Navigator.pop(context, widget.settings);
+    _goalController = TextEditingController(text: widget.currentGoal.toString());
   }
 
   @override
@@ -211,7 +167,13 @@ class _SettingsPageState extends State<SettingsPage> {
               decoration: const InputDecoration(labelText: '每日饮水目标 (ml)', border: OutlineInputBorder()),
             ),
             const SizedBox(height: 32),
-            ElevatedButton(onPressed: _saveSettings, child: const Text('保存设置')),
+            ElevatedButton(
+              onPressed: () {
+                final newGoal = int.tryParse(_goalController.text) ?? 2000;
+                Navigator.pop(context, newGoal.clamp(500, 5000));
+              },
+              child: const Text('保存设置'),
+            ),
           ],
         ),
       ),
